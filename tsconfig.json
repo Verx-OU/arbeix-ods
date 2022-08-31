@@ -1,8 +1,7 @@
 {
   "compilerOptions": {
-    "incremental": true,
     "target": "es2022",
-    "outDir": "build/main",
+    "outDir": "build/",
     "rootDir": "src",
     "moduleResolution": "node",
     "module": "node16",
