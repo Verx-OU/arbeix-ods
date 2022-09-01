@@ -1,4 +1,3 @@
-import { exit } from "process";
 import util from "util";
 
 export type Attrib = Record<string, string>;
@@ -19,23 +18,22 @@ export class Node {
   readonly parent?: Node;
   readonly item: Item;
   readonly name: string;
-  private _children: Node[];
-  public get children(): Node[] {
-    return this._children;
-  }
+  readonly children: Node[];
 
   constructor(item: Item, parent?: Node) {
     this.item = item;
     this.name = realKey(Object.keys(item)) ?? "";
     this.parent = parent;
     const items = this.item[this.name] || [];
-    this._children = items.map(this.create);
+    this.children = items.map(this.create);
   }
 
   protected create = (item: Item): Node => {
-    const parent = this;
-    if (item["#text"] !== undefined) return new TextNode(item, parent);
-    return new Node(item, parent);
+    for (const key in KNOWN_TAGS) {
+      if (key in item)
+        return new KNOWN_TAGS[key as keyof typeof KNOWN_TAGS](item, this);
+    }
+    return new Node(item, this);
   };
 
   get attrib(): Attrib {
@@ -66,23 +64,16 @@ export class Node {
     return it;
   };
 
-  all = <T extends Node = Node>(
-    key: string,
-    downcastTo?: NodeLike<T>
-  ): NodeSet<T> => {
+  all = <T extends Node = Node>(key: string): NodeSet<T> => {
     const nodes = this.children
       .filter((i) => i.name === key)
-      .map((i) => (downcastTo ? i.downcast(downcastTo) : (i as T)));
+      .map((i) => i as T);
     return new NodeSet<T>(...nodes);
   };
 
   walk = (fn: (node: Node) => void) => {
     fn(this);
     this.children.forEach((i) => i.walk(fn));
-  };
-
-  downcast = <T>(target: NodeLike<T>): T => {
-    return new target(this.item, this.parent);
   };
 
   clear = (): this => {
@@ -109,16 +100,23 @@ export class Node {
 
   copyContentsFrom = (other: Node): this => {
     const clone = structuredClone(other.item);
+    const key = realKey(Object.keys(clone))!;
     Object.defineProperties(this, {
       parent: { value: other.parent, enumerable: true },
       item: { value: clone, enumerable: true },
-      name: { value: realKey(Object.keys(clone))!, enumerable: true },
+      name: { value: key, enumerable: true },
+      children: { value: clone[key]!.map(this.create), enumerable: true },
     });
-    this._children = this.item[this.name]!.map(this.create);
     let parentIndex = this.parent!.children.indexOf(this);
     if (parentIndex === -1) throw "This node isn't in its own parent?";
     this.parent!.contained[parentIndex] = clone;
     return this;
+  };
+
+  root = (): Node => {
+    let i: Node = this;
+    while (i.parent !== undefined) i = i.parent;
+    return i;
   };
 
   [util.inspect.custom] = (): any => {
@@ -140,24 +138,25 @@ export class Document extends Node {
       "office:document-content",
       "office:body",
       "office:spreadsheet"
-    ).downcast(Spreadsheet);
+    ) as Spreadsheet;
 }
 
 class Spreadsheet extends Node {
-  tables = () => this.all("table:table", Table).indexByAttrib("table:name");
+  tables = () => this.all<Table>("table:table").indexByAttrib("table:name");
 }
 
 const FORMULA_REFERENCE = /(?<=[\[:])\.([A-Z]+)(\d+)(?=[\]:])/g;
 
 class Table extends Node {
   forEachRow = (fn: (row: Row) => void) => {
-    const rows = this.all("table:table-row", Row);
+    const rows = this.all<Row>("table:table-row");
     let rowIndex = 0;
     rows.forEach((row) => {
       fn(
         Object.defineProperty(row, "rowIndex", {
           value: rowIndex,
           enumerable: true,
+          writable: true,
         })
       );
       rowIndex += parseInt(row.attrib["table:number-rows-repeated"] ?? "1");
@@ -185,6 +184,7 @@ class Table extends Node {
     Object.defineProperty(newRow, "rowIndex", {
       value: index,
       enumerable: true,
+      writable: true,
     });
     this.contained.splice(actualIndex, 0, newItem);
     this.children.splice(actualIndex, 0, newRow);
@@ -212,13 +212,14 @@ export class Row extends Node {
   readonly rowIndex!: number;
 
   forEachCell = (fn: (cell: Cell) => void): this => {
-    const cells = this.all("table:table-cell", Cell);
+    const cells = this.all<Cell>("table:table-cell");
     let colIndex = 0;
+    let rowIndex = this.rowIndex;
     cells.forEach((cell) => {
       fn(
         Object.defineProperties(cell, {
-          rowIndex: { value: this.rowIndex, enumerable: true },
-          colIndex: { value: colIndex, enumerable: true },
+          rowIndex: { value: rowIndex, enumerable: true, writable: true },
+          colIndex: { value: colIndex, enumerable: true, writable: true },
         })
       );
       colIndex += parseInt(cell.attrib["table:number-columns-repeated"] ?? "1");
@@ -294,3 +295,11 @@ export class NodeSet<T extends Node = Node> extends Array<T> {
     return obj;
   };
 }
+
+const KNOWN_TAGS = {
+  "#text": TextNode,
+  "office:spreadsheet": Spreadsheet,
+  "table:table": Table,
+  "table:table-row": Row,
+  "table:table-cell": Cell,
+} as const;
