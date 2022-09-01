@@ -1,6 +1,7 @@
 /node_modules
 /lib
 .vscode
+package-lock.json
 *.ods
 *.mod.ods
 *.~*
