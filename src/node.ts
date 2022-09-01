@@ -12,8 +12,6 @@ function realKey(keys: string[]): string | undefined {
   return keys.filter((j) => ![":@", "#text"].includes(j))[0];
 }
 
-export type NodeLike<T> = new (hint: Item, parent?: Node) => T;
-
 export class Node {
   readonly parent?: Node;
   readonly item: Item;
@@ -101,11 +99,12 @@ export class Node {
   copyContentsFrom = (other: Node): this => {
     const clone = structuredClone(other.item);
     const key = realKey(Object.keys(clone))!;
+    const children = clone[key]!.map(this.create);
     Object.defineProperties(this, {
-      parent: { value: other.parent, enumerable: true },
-      item: { value: clone, enumerable: true },
-      name: { value: key, enumerable: true },
-      children: { value: clone[key]!.map(this.create), enumerable: true },
+      parent: { value: other.parent, enumerable: true, writable: true },
+      item: { value: clone, enumerable: true, writable: true },
+      name: { value: key, enumerable: true, writable: true },
+      children: { value: children, enumerable: true, writable: true },
     });
     let parentIndex = this.parent!.children.indexOf(this);
     if (parentIndex === -1) throw "This node isn't in its own parent?";
@@ -117,6 +116,13 @@ export class Node {
     let i: Node = this;
     while (i.parent !== undefined) i = i.parent;
     return i;
+  };
+
+  protected markAsDirty = () => {};
+
+  protected propagateDirty = () => {
+    this.markAsDirty();
+    this.children.forEach((i) => i.propagateDirty());
   };
 
   [util.inspect.custom] = (): any => {
@@ -148,23 +154,18 @@ class Spreadsheet extends Node {
 const FORMULA_REFERENCE = /(?<=[\[:])\.([A-Z]+)(\d+)(?=[\]:])/g;
 
 class Table extends Node {
-  forEachRow = (fn: (row: Row) => void) => {
-    const rows = this.all<Row>("table:table-row");
-    let rowIndex = 0;
-    rows.forEach((row) => {
-      fn(
-        Object.defineProperty(row, "rowIndex", {
-          value: rowIndex,
-          enumerable: true,
-          writable: true,
-        })
-      );
-      rowIndex += parseInt(row.attrib["table:number-rows-repeated"] ?? "1");
-    });
+  get rows() {
+    return this.all<Row>("table:table-row");
+  }
+
+  forEachRow = (fn: (row: Row) => void): this => {
+    this.rows.forEach((row) => fn(row));
+    return this;
   };
 
-  forEachCell = (fn: (cell: Cell) => void) => {
+  forEachCell = (fn: (cell: Cell) => void): this => {
     this.forEachRow((row) => row.forEachCell(fn));
+    return this;
   };
 
   // DANGER: doesn't handle inserting between repeated rows
@@ -181,13 +182,11 @@ class Table extends Node {
 
     const newItem: Item = { ["table:table-row"]: [] };
     const newRow: Row = new Row(newItem, this.parent);
-    Object.defineProperty(newRow, "rowIndex", {
-      value: index,
-      enumerable: true,
-      writable: true,
-    });
+
     this.contained.splice(actualIndex, 0, newItem);
     this.children.splice(actualIndex, 0, newRow);
+
+    this.propagateDirty();
     return newRow;
   };
 
@@ -205,25 +204,40 @@ class Table extends Node {
 
     this.contained.splice(actualIndex, 1);
     this.children.splice(actualIndex, 1);
+    this.propagateDirty();
   };
 }
 
 export class Row extends Node {
-  readonly rowIndex!: number;
+  private _rowIndex: number | undefined;
+
+  get rowIndex() {
+    if (this._rowIndex === undefined) this.updateRowIndex();
+    return this._rowIndex!;
+  }
+
+  private set rowIndex(index: number) {
+    this._rowIndex = index;
+  }
+
+  protected markAsDirty = () => {
+    this._rowIndex = undefined;
+  };
+
+  private updateRowIndex = () => {
+    let sum = 0;
+    this.table.rows.forEach((row) => {
+      row.rowIndex = sum;
+      sum += parseInt(row.attrib["table:number-rows-repeated"] ?? "1");
+    });
+  };
+
+  get cells() {
+    return this.all<Cell>("table:table-cell");
+  }
 
   forEachCell = (fn: (cell: Cell) => void): this => {
-    const cells = this.all<Cell>("table:table-cell");
-    let colIndex = 0;
-    let rowIndex = this.rowIndex;
-    cells.forEach((cell) => {
-      fn(
-        Object.defineProperties(cell, {
-          rowIndex: { value: rowIndex, enumerable: true, writable: true },
-          colIndex: { value: colIndex, enumerable: true, writable: true },
-        })
-      );
-      colIndex += parseInt(cell.attrib["table:number-columns-repeated"] ?? "1");
-    });
+    this.cells.forEach((cell) => fn(cell));
     return this;
   };
 
@@ -233,8 +247,32 @@ export class Row extends Node {
 }
 
 export class Cell extends Node {
-  readonly rowIndex!: number;
-  readonly colIndex!: number;
+  private _colIndex: number | undefined;
+
+  get rowIndex() {
+    return this.row.rowIndex;
+  }
+
+  get colIndex() {
+    if (this._colIndex === undefined) this.updateColIndex();
+    return this._colIndex!;
+  }
+
+  private set colIndex(index: number) {
+    this._colIndex = index;
+  }
+
+  protected markAsDirty = () => {
+    this._colIndex = undefined;
+  };
+
+  private updateColIndex = () => {
+    let sum = 0;
+    this.row.cells.forEach((cell) => {
+      cell.colIndex = sum;
+      sum += parseInt(cell.attrib["table:number-columns-repeated"] ?? "1");
+    });
+  };
 
   get row(): Row {
     return this.parent as Row;
